@@ -1,0 +1,4 @@
+.build/
+ClaudeTouchBar.app/
+.DS_Store
+signing/
