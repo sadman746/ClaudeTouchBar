@@ -2,14 +2,14 @@ import AppKit
 import Carbon.HIToolbox
 
 private enum ID {
-    static let tray = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.tray")
-    static let chatButton = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.chatButton")
-    static let screenshotButton = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.screenshotButton")
-    static let dictationButton = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.dictationButton")
-    static let statusLabel = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.statusLabel")
-    static let resultLabel = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.resultLabel")
-    static let continueChatButton = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.continueChatButton")
-    static let continueScreenshotButton = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.continueScreenshotButton")
+    static let tray = NSTouchBarItem.Identifier("com.claudetouchbar.app.tray")
+    static let chatButton = NSTouchBarItem.Identifier("com.claudetouchbar.app.chatButton")
+    static let screenshotButton = NSTouchBarItem.Identifier("com.claudetouchbar.app.screenshotButton")
+    static let dictationButton = NSTouchBarItem.Identifier("com.claudetouchbar.app.dictationButton")
+    static let statusLabel = NSTouchBarItem.Identifier("com.claudetouchbar.app.statusLabel")
+    static let resultLabel = NSTouchBarItem.Identifier("com.claudetouchbar.app.resultLabel")
+    static let continueChatButton = NSTouchBarItem.Identifier("com.claudetouchbar.app.continueChatButton")
+    static let continueScreenshotButton = NSTouchBarItem.Identifier("com.claudetouchbar.app.continueScreenshotButton")
 }
 
 private enum Mode {
@@ -129,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
                     self?.handle(answerResult)
                 }
             case .failure:
-                self.mode = .error("Screenshot non riuscito (serve permesso Registrazione Schermo)")
+                self.mode = .error("Screenshot failed (Screen Recording permission required)")
             }
         }
     }
@@ -145,9 +145,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
 
     private func message(for error: ClaudeRunnerError) -> String {
         switch error {
-        case .executableNotFound: return "claude CLI non trovato"
-        case .timedOut: return "Timeout: nessuna risposta in tempo"
-        case .nonZeroExit(let detail): return "Errore: \(detail)"
+        case .executableNotFound: return "claude CLI not found"
+        case .timedOut: return "Timed out waiting for a response"
+        case .nonZeroExit(let detail): return "Error: \(detail)"
         }
     }
 
@@ -210,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         case ID.statusLabel:
             let item = NSCustomTouchBarItem(identifier: identifier)
             switch mode {
-            case .loading: marquee.text = "Sto pensando…"
+            case .loading: marquee.text = "Thinking…"
             case .error(let message): marquee.text = message
             default: marquee.text = ""
             }

@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Claude Touch Bar</string>
     <key>CFBundleIdentifier</key>
-    <string>com.sadman.claudetouchbar</string>
+    <string>com.claudetouchbar.app</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
@@ -21,6 +21,6 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Personal utility for Sadman.</string>
+    <string>MIT License. See LICENSE.</string>
 </dict>
 </plist>

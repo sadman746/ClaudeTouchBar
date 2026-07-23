@@ -13,8 +13,13 @@ enum ClaudeRunner {
 
     private static let timeout: TimeInterval = 45
 
+    // The CLI can only read/write files under its working directory, so this
+    // also doubles as the root for ScreenshotCapture's cache folder.
+    static let workingDirectory = URL(fileURLWithPath: NSHomeDirectory())
+
     // A dedicated, persistent session ID keeps every Touch Bar question in one
-    // continuous conversation, isolated from Sadman's own manual chats in ~/Claude.
+    // continuous conversation, isolated from any manual `claude` chats you run
+    // yourself from the same working directory.
     private static var sessionID: String = {
         if let saved = UserDefaults.standard.string(forKey: "ClaudeTouchBarSessionID") {
             return saved
@@ -40,11 +45,11 @@ enum ClaudeRunner {
 
     static func describe(imagePath: String, completion: @escaping (Result<String, ClaudeRunnerError>) -> Void) {
         let prompt = """
-        Guarda lo screenshot che si trova in questo percorso: \(imagePath)
-        Spiega in italiano, in modo colloquiale e molto sintetico (massimo 2 frasi brevi, \
-        meno di 200 caratteri in totale) cosa vedi/cosa sta succedendo sullo schermo. \
-        La risposta verrà letta scorrendo su una Touch Bar strettissima, quindi niente elenchi, \
-        niente markdown, solo testo semplice su un'unica riga logica.
+        Look at the screenshot at this path: \(imagePath)
+        Describe, briefly and conversationally (2 short sentences max, under 200 \
+        characters total), what's on screen / what's happening. The answer will be \
+        read scrolling across a narrow Touch Bar, so no lists, no markdown, plain \
+        text on a single logical line.
         """
         ask(prompt, completion: completion)
     }
@@ -61,13 +66,11 @@ enum ClaudeRunner {
             // --safe-mode skips CLAUDE.md/hooks/plugins/MCP servers (keeps OAuth working,
             // unlike --bare) so the CLI doesn't probe unrelated folders (Desktop, Photos, ...)
             // and trigger a pile of unrelated permission prompts for a one-shot screenshot query.
-            // Running with cwd = ~/Claude keeps every session transcript in the same,
-            // easy-to-find project bucket Sadman already uses for this assistant.
             var args = ["-p", "--safe-mode", "--no-chrome", "--strict-mcp-config", "-n", "ClaudeTouchBar"]
             args += sessionStarted ? ["--resume", sessionID] : ["--session-id", sessionID]
             args.append(prompt)
             process.arguments = args
-            process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory() + "/Claude")
+            process.currentDirectoryURL = workingDirectory
 
             let stdout = Pipe()
             let stderr = Pipe()
@@ -103,9 +106,9 @@ enum ClaudeRunner {
                 if didTimeOut {
                     completion(.failure(.timedOut))
                 } else if process.terminationStatus != 0 {
-                    completion(.failure(.nonZeroExit(err.isEmpty ? "Errore sconosciuto" : err)))
+                    completion(.failure(.nonZeroExit(err.isEmpty ? "Unknown error" : err)))
                 } else if out.isEmpty {
-                    completion(.failure(.nonZeroExit("Nessuna risposta")))
+                    completion(.failure(.nonZeroExit("No response")))
                 } else {
                     sessionStarted = true
                     completion(.success(out))

@@ -8,10 +8,10 @@ enum ScreenshotError: Error {
 /// `screencapture` tool. Requires the user to grant Screen Recording
 /// permission to this app the first time it runs.
 enum ScreenshotCapture {
-    // The `claude` CLI can only Read files inside its working directory (~/Claude),
-    // so screenshots must land there, not in the system temp folder — otherwise
-    // its own file-access tool refuses to open them.
-    private static let cacheDir = URL(fileURLWithPath: NSHomeDirectory() + "/Claude/.touchbar-cache")
+    // The `claude` CLI can only Read files inside its working directory (see
+    // ClaudeRunner.workingDirectory), so screenshots must land there, not in the
+    // system temp folder — otherwise its own file-access tool refuses to open them.
+    private static let cacheDir = ClaudeRunner.workingDirectory.appendingPathComponent(".touchbar-cache")
 
     static func captureScreen(completion: @escaping (Result<URL, ScreenshotError>) -> Void) {
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
@@ -40,7 +40,7 @@ enum ScreenshotCapture {
                 if process.terminationStatus == 0, FileManager.default.fileExists(atPath: url.path) {
                     completion(.success(url))
                 } else {
-                    completion(.failure(.captureFailed(err.isEmpty ? "screencapture ha fallito" : err)))
+                    completion(.failure(.captureFailed(err.isEmpty ? "screencapture failed" : err)))
                 }
             }
         }

@@ -1,7 +1,7 @@
 import AppKit
 
 private enum InputTouchBarID {
-    static let preview = NSTouchBarItem.Identifier("com.sadman.claudetouchbar.preview")
+    static let preview = NSTouchBarItem.Identifier("com.claudetouchbar.app.preview")
 }
 
 /// A real (if visually negligible) window holding a real, editable NSTextField.
@@ -49,7 +49,7 @@ final class InputWindow: NSWindow, NSTouchBarDelegate {
     }
 
     func updatePreview(_ text: String) {
-        previewLabel.text = text.isEmpty ? "Scrivi la domanda…" : text
+        previewLabel.text = text.isEmpty ? "Type your question…" : text
     }
 
     override func makeTouchBar() -> NSTouchBar? {
