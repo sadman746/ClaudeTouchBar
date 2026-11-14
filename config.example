@@ -1,0 +1,19 @@
+# ClaudeTouchBar personal settings.
+# Copy to ~/.config/claudetouchbar/config and edit. Read by both the app and
+# tb-tools/tb; restart the app after changing it. Leave a value empty to turn
+# that feature off.
+
+# Mail account name exactly as shown in Mail.app (Settings > Accounts).
+MAIL_ACCOUNT="iCloud"
+# Sender address used for the drafts the assistant prepares.
+MAIL_SENDER="you@example.com"
+
+# Obsidian vault folder: notes are plain Markdown files inside it.
+VAULT="$HOME/Documents/MyVault"
+# Where quick notes go when no folder is named.
+NOTE_DEFAULT_FOLDER="Quicknote"
+# Folders the assistant may choose from.
+NOTE_FOLDERS="Quicknote, Work, Projects"
+
+# Calendar names (as shown in Calendar.app) the assistant may write to.
+CALENDARS="Work, Home"

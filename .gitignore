@@ -2,3 +2,6 @@
 ClaudeTouchBar.app/
 .DS_Store
 signing/
+local-assets/
+.omc/
+CLAUDE.local.md

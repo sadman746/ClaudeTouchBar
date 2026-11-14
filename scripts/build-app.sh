@@ -18,6 +18,21 @@ mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 cp "${BUILD_DIR}/${APP_NAME}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 cp "Resources/Info.plist" "${APP_BUNDLE}/Contents/Info.plist"
 
+# The one script the assistant may run travels inside the bundle, so the app
+# does not depend on where the repo lives.
+mkdir -p "${APP_BUNDLE}/Contents/Resources"
+cp "tb-tools/tb" "${APP_BUNDLE}/Contents/Resources/tb"
+chmod +x "${APP_BUNDLE}/Contents/Resources/tb"
+
+# local-assets/ is gitignored — present only on machines that opted in (see
+# README). When missing (e.g. a fresh clone), the app falls back to a plain
+# SF Symbol automatically, so this step is optional by design.
+if [ -f "local-assets/claude-icon.png" ]; then
+    mkdir -p "${APP_BUNDLE}/Contents/Resources"
+    cp "local-assets/claude-icon.png" "${APP_BUNDLE}/Contents/Resources/claude-icon.png"
+    echo "==> Bundled local claude-icon.png"
+fi
+
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
     echo "==> Code signing with stable local identity"
     codesign --force --deep --sign "$CERT_NAME" "${APP_BUNDLE}"

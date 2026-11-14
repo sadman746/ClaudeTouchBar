@@ -1,0 +1,412 @@
+#!/bin/bash
+#
+# tb — "safe box" dispatcher for ClaudeTouchBar's Apple-native assistant.
+#
+# ClaudeTouchBar runs `claude` headless with only THIS script pre-authorized
+# (--allowedTools "Bash(.../tb:*)"). That means the assistant can create/read/
+# delete Calendar events, Notes and Mail — and nothing else on the Mac. All the
+# AppleScript lives here, in one auditable place, instead of granting the agent
+# the ability to run arbitrary osascript.
+#
+# Design notes:
+#  - Arguments are passed to osascript via `on run argv` (never string-interpolated
+#    into the AppleScript source), so a value containing quotes can't inject code.
+#  - Output is kept short and single-line-ish: it is read scrolling on a Touch Bar.
+#  - Mail sending is intentionally NOT supported: mail-compose only opens a visible
+#    draft; the user reviews and presses Send. Only the destructive-but-reversible
+#    actions (delete → Trash / Recently Deleted) are automated.
+#
+# Usage:
+#   Calendar:
+#     tb cal-list [days]                                  # events now .. now+days (default 1)
+#     tb cal-add  <calendar> "YYYY-MM-DD HH:MM" <minutes> <summary> [notes]
+#     tb cal-del  <calendar> "YYYY-MM-DD" <summary-substring>
+#   Notes:
+#     tb note-list [folder]                               # note titles (optionally in one folder)
+#     tb note-read <title-substring>
+#     tb note-add  <folder> <title> <body>
+#     tb note-del  <title-substring>
+#   Mail (the account named in the config file):
+#     tb mail-list   [count]                              # recent INBOX (default 10)
+#     tb mail-read   <n>                                  # clean plain-text body
+#     tb mail-search <text> [count]                       # search all folders by subject/sender
+#     tb mail-compose <to> <subject> <body>              # opens a draft, does NOT send
+#     tb mail-del    <n>                                  # move to Trash
+#   Briefing:
+#     tb brief                                            # today's agenda + unread count
+
+set -euo pipefail
+
+# Personal settings (mail account, vault path, ...) live OUTSIDE the repo, in
+# a small KEY="value" file — see config.example. The path is fixed on purpose:
+# the assistant can only run this script, so it must not be able to point it
+# at a different config.
+CONFIG="$HOME/.config/claudetouchbar/config"
+MAIL_ACCOUNT=""            # account name as shown in Mail.app
+MAIL_SENDER=""             # address used as sender for drafts
+VAULT=""                   # Obsidian vault folder (notes are Markdown files)
+NOTE_DEFAULT_FOLDER="Quicknote"
+# shellcheck disable=SC1090
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# Written by the app (AgendaCache.swift) from EventKit.
+CAL_CACHE="$HOME/Library/Caches/ClaudeTouchBar/calendar.txt"
+
+# Audit log of mutating actions (create/delete/compose). Kept LOCAL and short —
+# titles/subjects only, never message bodies — so there is a trail of what the
+# assistant did to Calendar/Notes/Mail without storing sensitive content.
+LOG="$HOME/Library/Logs/ClaudeTouchBar.log"
+log() { mkdir -p "$(dirname "$LOG")"; printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"; }
+
+# Run "$@" with a hard timeout of $1 seconds; stdout is captured into TO_OUT.
+# Returns 0 on success, 124 on timeout, else the command's exit code. This is the
+# safety net that guarantees no osascript/icalBuddy call can hang the assistant
+# (e.g. blocked on a TCC permission prompt that can't be shown from a headless
+# launch) — worst case it fails fast and we fall back or report an error.
+TO_OUT=""
+run_to() {
+  local secs="$1"; shift
+  local tf; tf="$(mktemp)"
+  "$@" >"$tf" 2>/dev/null &
+  # Poll every 0.1s (w counts tenths): with a 1s step, even a 0.1s osascript
+  # call cost a full second before its result was picked up.
+  local p=$! w=0 rc=0 limit=$((secs * 10))
+  while kill -0 "$p" 2>/dev/null && [ "$w" -lt "$limit" ]; do sleep 0.1; w=$((w + 1)); done
+  if kill -0 "$p" 2>/dev/null; then
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+    rc=124
+  else
+    wait "$p" 2>/dev/null || rc=$?
+  fi
+  TO_OUT="$(cat "$tf")"; rm -f "$tf"
+  return "$rc"
+}
+
+die() { echo "tb: $*" >&2; exit 1; }
+
+need_mail()  { [ -n "$MAIL_ACCOUNT" ] || die "posta non configurata (MAIL_ACCOUNT in $CONFIG)"; }
+need_vault() { [ -n "$VAULT" ] && [ -d "$VAULT" ] || die "vault delle note non configurato (VAULT in $CONFIG)"; }
+
+# Fallback calendar listing via AppleScript (uses the Automation permission we
+# already have). No recurring-event expansion, but it never depends on icalBuddy
+# or the separate EventKit/Calendars permission — used when icalBuddy is missing,
+# unauthorized, or hangs. Returns "" when there are no events.
+cal_list_applescript() {
+  osascript - "$1" <<'APPLESCRIPT'
+on run argv
+  set numDays to (item 1 of argv) as integer
+  set dayStart to current date
+  set hours of dayStart to 0
+  set minutes of dayStart to 0
+  set seconds of dayStart to 0
+  set dayEnd to dayStart + (numDays * days)
+  set out to ""
+  tell application "Calendar"
+    repeat with c in calendars
+      set cn to name of c
+      try
+        set evs to (every event of c whose start date ≥ dayStart and start date < dayEnd)
+        repeat with e in evs
+          set out to out & cn & ": " & (summary of e) & " — " & ((start date of e) as string) & linefeed
+        end repeat
+      end try
+    end repeat
+  end tell
+  return out
+end run
+APPLESCRIPT
+}
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+
+# ---------------------------------------------------------------- CALENDAR ----
+cal-list)
+  # AppleScript only, behind a timeout. icalBuddy was dropped for good: even with
+  # Calendars permission granted to the app, the app->claude->icalBuddy subprocess
+  # is attributed to a different TCC client and stays denied (verified via log) —
+  # it only added a wasted ~6s timeout. AppleScript uses the Automation permission
+  # the app does have. Downside: it may miss some recurring occurrences (the real
+  # fast+recurring fix is reading EventKit inside the Swift app itself).
+  days="${1:-1}"
+  # Fast path: the app reads Calendar via EventKit (recurring events included)
+  # and refreshes this cache every few minutes. Lines start with a sortable
+  # "YYYY-MM-DD", so a day range is a plain string comparison.
+  if [ -f "$CAL_CACHE" ] && [ "$days" -le 7 ] 2>/dev/null \
+     && [ $(( $(date +%s) - $(stat -f %m "$CAL_CACHE") )) -lt 900 ]; then
+    from="$(date +%F)"; to="$(date -v+"${days}"d +%F)"
+    out="$(awk -v a="$from" -v b="$to" 'substr($0,1,10) >= a && substr($0,1,10) < b' "$CAL_CACHE")"
+    [ -n "$out" ] && echo "$out" || echo "Nessun impegno nel periodo."
+    exit 0
+  fi
+  if run_to 20 cal_list_applescript "$days"; then
+    out="$TO_OUT"
+  else
+    log "cal-list: AppleScript timeout/errore"
+    echo "Non riesco a leggere il calendario (timeout o permesso)."; exit 0
+  fi
+  [ -n "$out" ] && echo "$out" || echo "Nessun impegno nel periodo."
+  ;;
+
+cal-add)
+  [ $# -ge 4 ] || die "cal-add <calendar> \"YYYY-MM-DD HH:MM\" <minutes> <summary> [notes]"
+  cal="$1"; when="$2"; mins="$3"; summary="$4"; notes="${5:-}"
+  y="${when:0:4}"; mo="${when:5:2}"; d="${when:8:2}"; h="${when:11:2}"; mi="${when:14:2}"
+  log "cal-add [$cal] $when: $summary"
+  osascript - "$cal" "$y" "$mo" "$d" "$h" "$mi" "$mins" "$summary" "$notes" <<'APPLESCRIPT'
+on run argv
+  set calName to item 1 of argv
+  set sd to current date
+  set year of sd to (item 2 of argv) as integer
+  set month of sd to (item 3 of argv) as integer
+  set day of sd to (item 4 of argv) as integer
+  set hours of sd to (item 5 of argv) as integer
+  set minutes of sd to (item 6 of argv) as integer
+  set seconds of sd to 0
+  set ed to sd + ((item 7 of argv) as integer) * minutes
+  set summ to item 8 of argv
+  set nts to item 9 of argv
+  tell application "Calendar"
+    tell calendar calName
+      if nts is "" then
+        make new event with properties {summary:summ, start date:sd, end date:ed}
+      else
+        make new event with properties {summary:summ, start date:sd, end date:ed, description:nts}
+      end if
+    end tell
+  end tell
+  return "Evento creato in " & calName & ": " & summ
+end run
+APPLESCRIPT
+  ;;
+
+cal-del)
+  [ $# -ge 3 ] || die "cal-del <calendar> \"YYYY-MM-DD\" <summary-substring>"
+  cal="$1"; day="$2"; match="$3"
+  y="${day:0:4}"; mo="${day:5:2}"; d="${day:8:2}"
+  log "cal-del [$cal] $day ~$match"
+  osascript - "$cal" "$y" "$mo" "$d" "$match" <<'APPLESCRIPT'
+on run argv
+  set calName to item 1 of argv
+  set dayStart to current date
+  set year of dayStart to (item 2 of argv) as integer
+  set month of dayStart to (item 3 of argv) as integer
+  set day of dayStart to (item 4 of argv) as integer
+  set hours of dayStart to 0
+  set minutes of dayStart to 0
+  set seconds of dayStart to 0
+  set dayEnd to dayStart + (1 * days)
+  set matchStr to item 5 of argv
+  set n to 0
+  tell application "Calendar"
+    tell calendar calName
+      set evs to (every event whose start date ≥ dayStart and start date < dayEnd and summary contains matchStr)
+      repeat with e in evs
+        delete e
+        set n to n + 1
+      end repeat
+    end tell
+  end tell
+  return "Eliminati " & n & " eventi da " & calName & "."
+end run
+APPLESCRIPT
+  ;;
+
+# --------------------------------------------------- NOTES (Obsidian vault) ----
+# Notes are plain Markdown files in the Obsidian vault (if it is iCloud-synced
+# they appear in Obsidian on iPhone/iPad too). Quick captures default to the Quicknote
+# folder so the structured notes in the other folders stay untouched.
+# Dotfolders (.obsidian, .trash) are always excluded from listing/search.
+note-list)
+  need_vault
+  folder="${1:-}"
+  base="$VAULT"
+  [ -n "$folder" ] && base="$VAULT/$folder"
+  [ -d "$base" ] || die "cartella non trovata nel vault: $folder"
+  out="$(find "$base" -type f -name '*.md' -not -path '*/.*' 2>/dev/null | sed "s|$VAULT/||" | sort)"
+  [ -n "$out" ] && echo "$out" || echo "Nessuna nota."
+  ;;
+
+note-read)
+  [ $# -ge 1 ] || die "note-read <testo-nel-titolo>"
+  need_vault
+  f="$(find "$VAULT" -type f -name '*.md' -not -path '*/.*' -iname "*$1*" 2>/dev/null | head -1)"
+  [ -n "$f" ] || die "nessuna nota trovata per: $1"
+  cat "$f"
+  ;;
+
+note-add)
+  [ $# -ge 3 ] || die "note-add <cartella> <titolo> <corpo>"
+  need_vault
+  folder="$1"; title="$2"; body="$3"
+  { [ -z "$folder" ] || [ "$folder" = "-" ]; } && folder="$NOTE_DEFAULT_FOLDER"
+  dir="$VAULT/$folder"; mkdir -p "$dir"
+  # Sanitize title into a filename (Obsidian dislikes / : \ in names).
+  safe="$(printf '%s' "$title" | tr '/:\\' '---')"
+  file="$dir/$safe.md"
+  [ -e "$file" ] && file="$dir/$safe $(date +%H%M%S).md"
+  { echo "---"; echo "created: $(date +%Y-%m-%d)"; echo "---"; echo ""; echo "# $title"; echo ""; echo "$body"; } > "$file"
+  log "note-add $folder/$(basename "$file")"
+  echo "Nota creata in Obsidian: $folder/$(basename "$file")"
+  ;;
+
+note-del)
+  [ $# -ge 1 ] || die "note-del <testo-nel-titolo>"
+  need_vault
+  n=0; mkdir -p "$VAULT/.trash"
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    mv "$f" "$VAULT/.trash/$(basename "$f" .md) $(date +%H%M%S).md"
+    n=$((n + 1))
+  done < <(find "$VAULT" -type f -name '*.md' -not -path '*/.*' -iname "*$1*" 2>/dev/null)
+  log "note-del ~$1 ($n)"
+  echo "Spostate nel cestino di Obsidian: $n note."
+  ;;
+
+# -------------------------------------------------------------------- MAIL ----
+mail-list)
+  need_mail
+  count="${1:-10}"
+  osascript - "$MAIL_ACCOUNT" "$count" <<'APPLESCRIPT'
+on run argv
+  set acct to item 1 of argv
+  set lim to (item 2 of argv) as integer
+  set out to ""
+  tell application "Mail"
+    set msgs to messages of mailbox "INBOX" of account acct
+    set total to count of msgs
+    if total < lim then set lim to total
+    repeat with i from 1 to lim
+      set m to item i of msgs
+      set out to out & i & ". " & (sender of m) & " - " & (subject of m) & linefeed
+    end repeat
+  end tell
+  if out is "" then return "INBOX vuota."
+  return out
+end run
+APPLESCRIPT
+  ;;
+
+mail-read)
+  [ $# -ge 1 ] || die "mail-read <n>"
+  need_mail
+  # Pipe through tr/cat -s to strip the object-replacement char (U+FFFC, shown as
+  # a blank box for inline images in HTML mail) and collapse runs of blank lines,
+  # so the body reads as clean plain text.
+  osascript - "$MAIL_ACCOUNT" "$1" <<'APPLESCRIPT' | tr -d '\357\277\274\r' | cat -s
+on run argv
+  set acct to item 1 of argv
+  set idx to (item 2 of argv) as integer
+  tell application "Mail"
+    set m to item idx of (messages of mailbox "INBOX" of account acct)
+    return "Da: " & (sender of m) & linefeed & "Oggetto: " & (subject of m) & linefeed & "Data: " & ((date received of m) as string) & linefeed & linefeed & (content of m)
+  end tell
+end run
+APPLESCRIPT
+  ;;
+
+mail-compose)
+  [ $# -ge 3 ] || die "mail-compose <to> <subject> <body>"
+  need_mail
+  to="$1"; subj="$2"; body="$3"
+  log "mail-compose -> $to: $subj"
+  osascript - "$MAIL_SENDER" "$to" "$subj" "$body" <<'APPLESCRIPT'
+on run argv
+  set snd to item 1 of argv
+  set toAddr to item 2 of argv
+  set subj to item 3 of argv
+  set bdy to item 4 of argv
+  tell application "Mail"
+    set msg to make new outgoing message with properties {subject:subj, content:bdy, visible:true}
+    tell msg
+      set sender to snd
+      make new to recipient with properties {address:toAddr}
+    end tell
+    activate
+  end tell
+  return "Bozza aperta per " & toAddr & " (rivedi e premi Invia)."
+end run
+APPLESCRIPT
+  ;;
+
+mail-del)
+  [ $# -ge 1 ] || die "mail-del <n>"
+  need_mail
+  log "mail-del #$1"
+  osascript - "$MAIL_ACCOUNT" "$1" <<'APPLESCRIPT'
+on run argv
+  set acct to item 1 of argv
+  set idx to (item 2 of argv) as integer
+  tell application "Mail"
+    set m to item idx of (messages of mailbox "INBOX" of account acct)
+    set subj to subject of m
+    delete m
+    return "Spostata nel cestino: " & subj
+  end tell
+end run
+APPLESCRIPT
+  ;;
+
+mail-search)
+  [ $# -ge 1 ] || die "mail-search <testo> [numero]"
+  need_mail
+  q="$1"; lim="${2:-10}"
+  osascript - "$MAIL_ACCOUNT" "$q" "$lim" <<'APPLESCRIPT'
+on run argv
+  set acct to item 1 of argv
+  set q to item 2 of argv
+  set lim to (item 3 of argv) as integer
+  set out to ""
+  set n to 0
+  tell application "Mail"
+    -- Search every mailbox of the account (not just INBOX), by subject or sender.
+    repeat with mb in mailboxes of account acct
+      if n ≥ lim then exit repeat
+      try
+        set hits to (messages of mb whose subject contains q or sender contains q)
+        repeat with m in hits
+          if n ≥ lim then exit repeat
+          set out to out & (name of mb) & ": " & (sender of m) & " - " & (subject of m) & linefeed
+          set n to n + 1
+        end repeat
+      end try
+    end repeat
+  end tell
+  if out is "" then return "Nessun risultato per: " & q
+  return out
+end run
+APPLESCRIPT
+  ;;
+
+# -------------------------------------------------------------------- BRIEF ----
+brief)
+  # One-shot morning briefing: today's agenda (via cal-list, already timeout-safe)
+  # plus the count of unread mail (behind a timeout so it can't hang either).
+  # The calendar read runs in the background while the unread count runs, so
+  # the two slow AppleScript calls overlap instead of adding up.
+  agenda_file="$(mktemp)"
+  "$0" cal-list 1 >"$agenda_file" 2>/dev/null &
+  agenda_pid=$!
+  unread=""
+  if [ -n "$MAIL_ACCOUNT" ]; then
+    if run_to 8 osascript -e 'on run argv' \
+         -e 'tell application "Mail" to count (messages of mailbox "INBOX" of account (item 1 of argv) whose read status is false)' \
+         -e 'end run' "$MAIL_ACCOUNT"; then
+      unread="$TO_OUT"
+    else
+      unread="?"; log "brief: conteggio non letti fallito"
+    fi
+  fi
+  wait "$agenda_pid" 2>/dev/null || true
+  agenda="$(cat "$agenda_file")"; rm -f "$agenda_file"
+  echo "AGENDA OGGI:"
+  echo "$agenda"
+  [ -n "$MAIL_ACCOUNT" ] && echo "MAIL NON LETTE: ${unread:-?}" || true
+  ;;
+
+*)
+  die "comando sconosciuto: '$cmd'. Vedi l'intestazione di questo script per l'uso."
+  ;;
+esac

@@ -37,6 +37,13 @@ enum TouchBarPrivate {
         _ = (NSTouchBarItem.self as AnyObject).perform(NSSelectorFromString("addSystemTrayItem:"), with: item)
     }
 
+    /// Takes `item` back out of the Control Strip (re-add it with addSystemTrayItem).
+    static func removeSystemTrayItem(_ item: NSTouchBarItem) {
+        let selector = NSSelectorFromString("removeSystemTrayItem:")
+        guard (NSTouchBarItem.self as AnyObject).responds(to: selector) else { return }
+        _ = (NSTouchBarItem.self as AnyObject).perform(selector, with: item)
+    }
+
     /// Presents `touchBar` system-wide, replacing the Control Strip content, with a close (X)
     /// button shown automatically once we're no longer the frontmost app.
     static func presentModal(_ touchBar: NSTouchBar, trayIdentifier: NSTouchBarItem.Identifier) {

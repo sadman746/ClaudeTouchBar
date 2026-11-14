@@ -20,6 +20,10 @@
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Shows your next event on the Touch Bar and lets the assistant read your agenda quickly.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Shows your next event on the Touch Bar and lets the assistant read your agenda quickly.</string>
     <key>NSHumanReadableCopyright</key>
     <string>MIT License. See LICENSE.</string>
 </dict>
